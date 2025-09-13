@@ -42,48 +42,74 @@ export function AuthView() {
     }
   }, [])
 
-  // LocalStorage utility functions
-  const getStorageKey = (key: string) => {
-    return user ? `hackmit_${user.id}_${key}` : null
-  }
+  // Supabase data functions
+  const loadUserVaults = async () => {
+    if (!user) return
 
-  const saveToStorage = (key: string, data: any) => {
-    const storageKey = getStorageKey(key)
-    if (storageKey) {
-      try {
-        localStorage.setItem(storageKey, JSON.stringify(data))
-      } catch (error) {
-        console.error('Failed to save to localStorage:', error)
-      }
+    try {
+      const { data: vaultsData, error } = await supabase
+        .from('vaults')
+        .select(`
+          id,
+          name,
+          created_at,
+          files(count)
+        `)
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: true })
+
+      if (error) throw error
+
+      const vaultsWithCount = vaultsData?.map(vault => ({
+        id: vault.id,
+        name: vault.name,
+        fileCount: vault.files?.[0]?.count || 0
+      })) || []
+
+      setVaults(vaultsWithCount)
+    } catch (error) {
+      console.error('Error loading vaults:', error)
     }
   }
 
-  const loadFromStorage = (key: string) => {
-    const storageKey = getStorageKey(key)
-    if (storageKey) {
-      try {
-        const stored = localStorage.getItem(storageKey)
-        return stored ? JSON.parse(stored) : null
-      } catch (error) {
-        console.error('Failed to load from localStorage:', error)
-        return null
-      }
+  const loadVaultFiles = async (vaultId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('files')
+        .select('*')
+        .eq('vault_id', vaultId)
+        .order('uploaded_at', { ascending: false })
+
+      if (error) throw error
+
+      const formattedFiles = data?.map(file => ({
+        id: file.id,
+        name: file.name,
+        size: formatFileSize(file.file_size),
+        type: file.file_type?.split('/')[1] || 'unknown'
+      })) || []
+
+      setFiles(prev => ({
+        ...prev,
+        [vaultId]: formattedFiles
+      }))
+    } catch (error) {
+      console.error('Error loading files:', error)
     }
-    return null
+  }
+
+  const formatFileSize = (bytes: number): string => {
+    if (bytes === 0) return '0 B'
+    const k = 1024
+    const sizes = ['B', 'KB', 'MB', 'GB']
+    const i = Math.floor(Math.log(bytes) / Math.log(k))
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
   }
 
   // Load user data when user signs in
   useEffect(() => {
     if (user) {
-      const savedVaults = loadFromStorage('vaults')
-      const savedFiles = loadFromStorage('files')
-      
-      if (savedVaults) {
-        setVaults(savedVaults)
-      }
-      if (savedFiles) {
-        setFiles(savedFiles)
-      }
+      loadUserVaults()
     } else {
       // Clear data when user signs out
       setVaults([])
@@ -93,19 +119,12 @@ export function AuthView() {
     }
   }, [user])
 
-  // Save vaults when they change
+  // Load files when vault is selected
   useEffect(() => {
-    if (user && vaults.length >= 0) {
-      saveToStorage('vaults', vaults)
+    if (selectedVault && !files[selectedVault]) {
+      loadVaultFiles(selectedVault)
     }
-  }, [vaults, user])
-
-  // Save files when they change
-  useEffect(() => {
-    if (user) {
-      saveToStorage('files', files)
-    }
-  }, [files, user])
+  }, [selectedVault])
 
   // Close profile menu when clicking outside
   useEffect(() => {
@@ -148,26 +167,66 @@ export function AuthView() {
     setShowProfileMenu(false)
   }
 
-  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const uploadedFiles = event.target.files
-    if (uploadedFiles && selectedVault) {
-      Array.from(uploadedFiles).forEach(file => {
-        const newFile = {
-          id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
-          name: file.name,
-          size: file.size > 1024 * 1024 ? `${(file.size / (1024 * 1024)).toFixed(1)} MB` : `${(file.size / 1024).toFixed(0)} KB`,
-          type: file.name.split('.').pop() || 'unknown'
+    if (!uploadedFiles || !selectedVault || !user) return
+
+    try {
+      const uploadPromises = Array.from(uploadedFiles).map(async (file) => {
+        // Create unique file path
+        const fileExt = file.name.split('.').pop()
+        const fileName = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}.${fileExt}`
+        const filePath = `${user.id}/${selectedVault}/${fileName}`
+
+        // Upload to Supabase Storage
+        const { error: uploadError } = await supabase.storage
+          .from('vault-files')
+          .upload(filePath, file)
+
+        if (uploadError) throw uploadError
+
+        // Save file metadata to database
+        const { data, error: dbError } = await supabase
+          .from('files')
+          .insert({
+            vault_id: selectedVault,
+            name: file.name,
+            file_path: filePath,
+            file_size: file.size,
+            file_type: file.type
+          })
+          .select()
+          .single()
+
+        if (dbError) throw dbError
+
+        return {
+          id: data.id,
+          name: data.name,
+          size: formatFileSize(data.file_size),
+          type: data.file_type?.split('/')[1] || 'unknown'
         }
-        setFiles(prev => ({
-          ...prev,
-          [selectedVault]: [...(prev[selectedVault] || []), newFile]
-        }))
-        setVaults(prev => prev.map(vault => 
-          vault.id === selectedVault 
-            ? { ...vault, fileCount: vault.fileCount + 1 }
-            : vault
-        ))
       })
+
+      const newFiles = await Promise.all(uploadPromises)
+
+      // Update local state
+      setFiles(prev => ({
+        ...prev,
+        [selectedVault]: [...(prev[selectedVault] || []), ...newFiles]
+      }))
+
+      setVaults(prev => prev.map(vault => 
+        vault.id === selectedVault 
+          ? { ...vault, fileCount: vault.fileCount + newFiles.length }
+          : vault
+      ))
+
+      // Clear the input
+      event.target.value = ''
+    } catch (error) {
+      console.error('Error uploading files:', error)
+      // You could add a toast notification here
     }
   }
 
@@ -182,31 +241,60 @@ export function AuthView() {
     setSelectedVault(null)
   }
 
-  const handleCreateVault = () => {
-    if (newVaultName.trim()) {
-      const vaultId = newVaultName.toLowerCase().replace(/\s+/g, '-') + '-' + Date.now()
+  const handleCreateVault = async () => {
+    if (!newVaultName.trim() || !user) return
+
+    try {
+      const { data, error } = await supabase
+        .from('vaults')
+        .insert({
+          name: newVaultName.trim(),
+          user_id: user.id
+        })
+        .select()
+        .single()
+
+      if (error) throw error
+
       const newVault = {
-        id: vaultId,
-        name: newVaultName.trim(),
+        id: data.id,
+        name: data.name,
         fileCount: 0
       }
+
       setVaults(prev => [...prev, newVault])
-      setFiles(prev => ({ ...prev, [vaultId]: [] }))
+      setFiles(prev => ({ ...prev, [data.id]: [] }))
       setNewVaultName('')
       setShowCreateVault(false)
+    } catch (error) {
+      console.error('Error creating vault:', error)
+      // You could add a toast notification here
     }
   }
 
-  const handleDeleteVault = (vaultId: string) => {
-    setVaults(prev => prev.filter(v => v.id !== vaultId))
-    setFiles(prev => {
-      const newFiles = { ...prev }
-      delete newFiles[vaultId]
-      return newFiles
-    })
-    if (selectedVault === vaultId) {
-      setVaultView('list')
-      setSelectedVault(null)
+  const handleDeleteVault = async (vaultId: string) => {
+    try {
+      const { error } = await supabase
+        .from('vaults')
+        .delete()
+        .eq('id', vaultId)
+        .eq('user_id', user?.id)
+
+      if (error) throw error
+
+      setVaults(prev => prev.filter(v => v.id !== vaultId))
+      setFiles(prev => {
+        const newFiles = { ...prev }
+        delete newFiles[vaultId]
+        return newFiles
+      })
+      
+      if (selectedVault === vaultId) {
+        setVaultView('list')
+        setSelectedVault(null)
+      }
+    } catch (error) {
+      console.error('Error deleting vault:', error)
     }
   }
 
@@ -302,7 +390,7 @@ export function AuthView() {
                           placeholder="Enter vault name..."
                           value={newVaultName}
                           onChange={(e) => setNewVaultName(e.target.value)}
-                          onKeyPress={(e) => e.key === 'Enter' && handleCreateVault()}
+                          onKeyPress={(e) => e.key === 'Enter' && void handleCreateVault()}
                           autoFocus
                         />
                         <div className="create-vault-actions">
