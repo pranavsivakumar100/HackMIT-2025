@@ -1,0 +1,77 @@
+/* Base layout */
+html, body, #root { height: 100%; }
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  color: #e7e7ea;
+  background: radial-gradient(1200px 600px at 20% -10%, #4f46e5 0%, transparent 60%),
+              radial-gradient(1000px 600px at 110% 10%, #22d3ee 0%, transparent 60%),
+              #0b0c10;
+  /* Override index.css body flexbox */
+  display: block !important;
+  place-items: unset !important;
+}
+
+.app-shell {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+/* Auth card */
+.auth-card {
+  width: min(92vw, 420px);
+  backdrop-filter: blur(10px);
+  background: rgba(17, 18, 23, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+  padding: 28px;
+  overflow: hidden;
+}
+
+.auth-title {
+  margin: 0 0 16px 0;
+  font-size: 24px;
+  font-weight: 700;
+}
+
+.auth-stack { display: grid; gap: 12px; }
+
+.input {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.05);
+  color: #e7e7ea;
+  outline: none;
+}
+.input::placeholder { color: #a1a1aa; }
+.input:focus { border-color: #818cf8; box-shadow: 0 0 0 3px rgba(99,102,241,0.25); }
+
+.btn {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: #181a22;
+  color: #e7e7ea;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn:hover { background: #1f2230; }
+.btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.btn-primary { background: linear-gradient(135deg, #6366f1, #22d3ee); border: 0; }
+.btn-primary:hover { filter: brightness(1.05); }
+
+/* Google button */
+.btn-google { background: #ffffff; color: #1f2937; border: 0; }
+.btn-google:hover { background: #f2f2f2; }
+.btn-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+.note { color: #93c5fd; font-size: 12px; }
+.error { color: #fda4af; font-size: 12px; }
