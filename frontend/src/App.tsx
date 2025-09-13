@@ -3,7 +3,7 @@ import { AuthView } from './auth/AuthView'
 
 function App() {
   return (
-    <div className="app-shell">
+    <div className="app-container">
       <AuthView />
     </div>
   )
