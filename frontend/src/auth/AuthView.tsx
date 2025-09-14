@@ -508,7 +508,7 @@ export function AuthView() {
   const handleAcceptInvite = async () => {
     console.log('handleAcceptInvite called:', { inviteCode: inviteCode.trim(), user: user?.id })
     if (!inviteCode.trim()) {
-      alert('Please enter an invite code')
+      console.warn('Please enter an invite code')
       return
     }
     if (!user) {
@@ -1051,9 +1051,9 @@ export function AuthView() {
       if (error.message?.includes('storage')) {
         alert(`Storage error: ${error.message}`)
       } else if (error.code === '23503') {
-        alert('Invalid server reference. Please refresh and try again.')
+        console.error('Invalid server reference. Please refresh and try again.')
       } else if (error.code === '42501') {
-        alert('Permission denied. You may not have access to upload files to this server.')
+        console.error('Permission denied. You may not have access to upload files to this server.')
       } else {
         alert(`Failed to upload files: ${error.message || 'Unknown error'}`)
       }
@@ -1479,7 +1479,7 @@ export function AuthView() {
     console.log('handleCreateChannel called:', { newChannelName, selectedServer, newChannelType, user: user?.id })
     if (!newChannelName.trim() || !selectedServer) {
       console.log('Missing required data:', { newChannelName: newChannelName.trim(), selectedServer })
-      alert('Please enter a channel name')
+      console.warn('Please enter a channel name')
       return
     }
     
@@ -1553,10 +1553,10 @@ export function AuthView() {
       }
 
       setShowChannelMenu(false)
-      alert(`Channel "${channel?.name || 'Unknown'}" deleted successfully!`)
+      console.log(`Channel "${channel?.name || 'Unknown'}" deleted successfully`)
     } catch (error: any) {
       console.error('Error deleting channel:', error)
-      alert(`Failed to delete channel: ${error.message || 'Unknown error'}`)
+      console.error(`Failed to delete channel: ${error.message || 'Unknown error'}`)
     }
   }
 
@@ -2068,22 +2068,7 @@ export function AuthView() {
                       <div className="channel-divider">|</div>
                       <span className="channel-description">Channel for team discussion</span>
                       
-                      <div className="channel-actions">
-                        <button 
-                          className="member-count-btn"
-                          onClick={() => setShowMemberList(!showMemberList)}
-                          title="View Members"
-                        >
-                          👥 {serverMembers[selectedServer]?.length || 0}
-                        </button>
-                        <button 
-                          className="invite-btn"
-                          onClick={() => setShowInviteModal(true)}
-                          title="Invite Members"
-                        >
-                          ➕
-                        </button>
-                      </div>
+                      {/* channel-actions removed per request */}
                     </div>
                     
                     <div className="channel-content">
@@ -2394,9 +2379,9 @@ export function AuthView() {
                     onClick={async () => {
                       try {
                         await navigator.clipboard.writeText(generatedInviteCode)
-                        alert('Invite code copied to clipboard!')
+                        console.log('Invite code copied to clipboard')
                       } catch {
-                        alert('Could not copy. Select the text and copy manually.')
+                        console.warn('Could not copy. Select the text and copy manually.')
                       }
                     }}
                   >
