@@ -495,6 +495,38 @@ export type Database = {
         }
         Relationships: []
       }
+      voice_presence: {
+        Row: {
+          channel_id: string
+          user_id: string
+          user_name: string
+          joined_at: string
+          updated_at: string
+        }
+        Insert: {
+          channel_id: string
+          user_id: string
+          user_name: string
+          joined_at?: string
+          updated_at?: string
+        }
+        Update: {
+          channel_id?: string
+          user_id?: string
+          user_name?: string
+          joined_at?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "voice_presence_channel_id_fkey"
+            columns: ["channel_id"]
+            isOneToOne: false
+            referencedRelation: "channels"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       vault_permission_names: {
         Row: {
           perm: string

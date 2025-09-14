@@ -1,7 +1,15 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .auth import router as auth_router
+from .voice import router as voice_router
+from .vault_ai import router as vault_ai_router
+from .server_ai import router as server_ai_router
+from .voice_agent import router as voice_agent_router
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from a .env file if present (local dev)
+load_dotenv()
 
 app = FastAPI(title="Collaborative AI Platform API")
 
@@ -33,3 +41,7 @@ app.add_middleware(
 )
 
 app.include_router(auth_router, prefix="/auth")
+app.include_router(voice_router)
+app.include_router(vault_ai_router)
+app.include_router(server_ai_router)
+app.include_router(voice_agent_router)

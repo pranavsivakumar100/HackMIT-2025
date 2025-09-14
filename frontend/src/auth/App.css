@@ -1,0 +1,25 @@
+/* Chat specific minor styles */
+.chat-messages::-webkit-scrollbar {
+  width: 8px;
+}
+
+.chat-messages::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.2);
+  border-radius: 4px;
+}
+
+/* Claude AI message styling */
+.claude-message {
+  border-left: 3px solid #10a37f !important;
+  background: rgba(16, 163, 127, 0.1) !important;
+}
+
+.claude-message .username {
+  color: #10a37f !important;
+  font-weight: 600 !important;
+}
+
+.claude-message .message-avatar {
+  background: #10a37f !important;
+  color: white !important;
+}

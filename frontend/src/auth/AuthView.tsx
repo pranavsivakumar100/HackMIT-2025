@@ -1,4 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import micIcon from '../../assets/mic.png'
+import muteIcon from '../../assets/mute-button.png'
+import videoIcon from '../../assets/video.png'
+import endCallIcon from '../../assets/end-call.png'
 import { supabase } from './supabaseClient'
 import type { User } from '@supabase/supabase-js'
 
@@ -49,9 +53,294 @@ export function AuthView() {
   const [newChannelType, setNewChannelType] = useState<'text' | 'voice'>('text')
   
   // Chat/Messaging state
-  const [messages, setMessages] = useState<{[channelId: string]: Array<{id: string, content: string, user_id: string, created_at: string | null, user?: {email: string | null}}>}>({})
+  const [messages, setMessages] = useState<{[channelId: string]: Array<{id: string, content: string, user_id: string, created_at: string | null, message_type?: string | null, user?: {email: string | null}}>}>({})
   const [messageInput, setMessageInput] = useState('')
   const [vaultMessageInput, setVaultMessageInput] = useState('')
+  const chatEndRef = useRef<HTMLDivElement | null>(null)
+  const apiBase = (import.meta as any).env?.VITE_API_BASE || 'http://localhost:8000'
+
+  // Scroll to bottom effect
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages, selectedVault])
+
+  const [daily, setDaily] = useState<any>(null)
+  const [inVoice, setInVoice] = useState(false)
+  const [muted, setMuted] = useState(true)
+  const [videoOn, setVideoOn] = useState(false)
+  const [screenOn, setScreenOn] = useState(false)
+  const [joiningVoice, setJoiningVoice] = useState(false)
+  const [participants, setParticipants] = useState<Array<{id: string, name: string, audio: boolean, video: boolean}>>([])
+  const [activeVoiceChannelId, setActiveVoiceChannelId] = useState<string | null>(null)
+  const [voicePresenceByChannel, setVoicePresenceByChannel] = useState<{[channelId: string]: Array<{ user_id: string, user_name: string }>}>(() => ({}))
+  const mediaContainerRef = useRef<HTMLDivElement | null>(null)
+
+  const joinVoiceChannel = async (channelId: string) => {
+    try {
+      if (joiningVoice) return
+      setJoiningVoice(true)
+      // If already in a call on a different channel, handoff by leaving first
+      if (daily && activeVoiceChannelId && activeVoiceChannelId !== channelId) {
+        try {
+          await daily.leave()
+          daily.destroy?.()
+        } catch {}
+        try {
+          if (user?.id) {
+            await supabase.from('voice_presence').delete().eq('channel_id', activeVoiceChannelId).eq('user_id', user.id)
+          }
+        } catch {}
+        ;(window as any).__dailyCallInstance = undefined
+        setParticipants([])
+        setInVoice(false)
+        setDaily(null)
+      } else if (daily && activeVoiceChannelId === channelId) {
+        // Already connected to this channel
+        return
+      }
+      const userName = user?.email?.split('@')[0] || 'User'
+      const session = await supabase.auth.getSession()
+      const token = session.data.session?.access_token || ''
+      const resp = await fetch(`${import.meta.env.VITE_API_BASE}/voice/join`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ channel_id: channelId, user_name: userName })
+      })
+      if (!resp.ok) throw new Error(await resp.text())
+      const data = await resp.json()
+
+      const dailyModule = await import('@daily-co/daily-js')
+      const DailyIframe = (dailyModule as any)?.DailyIframe || (dailyModule as any)?.default
+      if (!DailyIframe) {
+        throw new Error('Daily call object not available from @daily-co/daily-js')
+      }
+
+      // If a call instance already exists (singleton), leave & destroy before creating new
+      const existing = (DailyIframe as any).getCallInstance ? (DailyIframe as any).getCallInstance() : (window as any).__dailyCallInstance
+      if (existing) {
+        try { await existing.leave() } catch {}
+        try { existing.destroy?.() } catch {}
+      }
+
+      // Use headless call object (Discord-like audio experience)
+      const call = DailyIframe.createCallObject()
+      ;(window as any).__dailyCallInstance = call
+      await call.join({ url: data.room_url, token: data.token })
+      await call.setLocalVideo(true)
+      await call.setLocalAudio(false)
+      setMuted(true)
+      setDaily(call)
+      setInVoice(true)
+      setActiveVoiceChannelId(channelId)
+      // Record voice presence so others can see you're in this channel
+      try {
+        if (user?.id) {
+          const display = user.email?.split('@')[0] || 'User'
+          const { error } = await supabase
+            .from('voice_presence')
+            .upsert({ channel_id: channelId, user_id: user.id, user_name: display }, { onConflict: 'channel_id,user_id', ignoreDuplicates: true })
+          // Ignore duplicates (another tab may have written it)
+          if (error && (error.code === '23505' || (error as any)?.status === 409)) {
+            // noop
+          } else if (error) {
+            throw error
+          }
+        }
+      } catch (err) {
+        console.warn('voice_presence upsert failed', err)
+      }
+      // Attach participant listeners & media rendering
+      const updateFromParticipants = () => {
+        try {
+          const pMap = call.participants() as any
+          const list: Array<{id: string, name: string, audio: boolean, video: boolean}> = []
+          Object.values(pMap || {}).forEach((p: any) => {
+            if (!p?.session_id) return
+            list.push({
+              id: p.session_id,
+              name: p.user_name || p.user_id || 'User',
+              audio: !!p.audio,
+              video: !!p.video
+            })
+          })
+          setParticipants(list)
+        } catch (e) {
+          // ignore
+        }
+      }
+      const handleTrackStarted = (ev: any) => {
+        try {
+          const t: MediaStreamTrack | undefined = ev?.track
+          if (!t || t.kind !== 'video') return
+          if (!mediaContainerRef.current) return
+          const existing = mediaContainerRef.current.querySelector(`[data-daily-track-id="${(t as any).id}"]`)
+          if (existing) return
+          const video = document.createElement('video')
+          video.autoplay = true
+          video.muted = !!ev?.participant?.local
+          video.playsInline = true
+          try { video.srcObject = new MediaStream([t]) } catch {}
+          video.dataset['dailyTrackId'] = (t as any).id || ''
+          video.style.width = '100%'
+          video.style.height = '100%'
+          video.style.objectFit = 'cover'
+          const wrapper = document.createElement('div')
+          wrapper.style.borderRadius = '8px'
+          wrapper.style.overflow = 'hidden'
+          wrapper.style.background = '#111'
+          wrapper.style.aspectRatio = '16 / 9'
+          wrapper.style.width = '100%'
+          wrapper.appendChild(video)
+          mediaContainerRef.current.appendChild(wrapper)
+        } catch {}
+      }
+      const handleTrackStopped = (ev: any) => {
+        try {
+          const t: MediaStreamTrack | undefined = ev?.track
+          if (!t || !mediaContainerRef.current) return
+          const node = mediaContainerRef.current.querySelector(`[data-daily-track-id="${(t as any).id}"]`)
+          const wrapper = node?.parentElement
+          if (wrapper && mediaContainerRef.current.contains(wrapper)) {
+            mediaContainerRef.current.removeChild(wrapper)
+          }
+        } catch {}
+      }
+      call.on('track-started', handleTrackStarted)
+      call.on('track-stopped', handleTrackStopped)
+      call.on('participant-joined', updateFromParticipants)
+      call.on('participant-updated', updateFromParticipants)
+      call.on('participant-left', updateFromParticipants)
+      call.on('joined-meeting', updateFromParticipants)
+      call.on('left-meeting', () => {
+        setParticipants([])
+        try { if (mediaContainerRef.current) mediaContainerRef.current.innerHTML = '' } catch {}
+      })
+      // Initial populate
+      updateFromParticipants()
+    } catch (e) {
+      console.error('Failed to join voice:', e)
+    }
+    finally {
+      setJoiningVoice(false)
+    }
+  }
+
+  const leaveVoiceChannel = async () => {
+    try {
+      await daily?.leave()
+      daily?.destroy?.()
+    } catch (e) {
+      // ignore
+    } finally {
+      setInVoice(false)
+      setDaily(null)
+      setMuted(true)
+      setVideoOn(false)
+      setScreenOn(false)
+      try { delete (window as any).__dailyCallInstance } catch {}
+      setParticipants([])
+      setActiveVoiceChannelId(null)
+      // Remove voice presence row
+      try {
+        if (user?.id && activeVoiceChannelId) {
+          await supabase.from('voice_presence').delete().eq('channel_id', activeVoiceChannelId).eq('user_id', user.id)
+        }
+      } catch (err) {
+        console.warn('voice_presence delete failed', err)
+      }
+    }
+  }
+
+  // Load voice presence for all voice channels in the selected server
+  useEffect(() => {
+    const channelList = channels[selectedServer] || []
+    const voiceChannelIds = channelList.filter(c => c.type === 'voice').map(c => c.id)
+    if (voiceChannelIds.length === 0) {
+      setVoicePresenceByChannel({})
+      return
+    }
+    ;(async () => {
+      try {
+        const { data, error } = await supabase
+          .from('voice_presence')
+          .select('channel_id,user_id,user_name')
+          .in('channel_id', voiceChannelIds)
+        if (error) throw error
+        const map: {[k: string]: Array<{user_id: string, user_name: string}>} = {}
+        ;(data || []).forEach((row: any) => {
+          if (!map[row.channel_id]) map[row.channel_id] = []
+          map[row.channel_id].push({ user_id: row.user_id, user_name: row.user_name })
+        })
+        setVoicePresenceByChannel(map)
+      } catch (e) {
+        console.warn('Failed to load voice_presence', e)
+      }
+    })()
+
+    // Realtime subscription
+    const sub = supabase
+      .channel('voice-presence')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'voice_presence' }, (payload) => {
+        const row: any = payload.new || payload.old
+        if (!row || !voiceChannelIds.includes(row.channel_id)) return
+        setVoicePresenceByChannel(prev => {
+          const next = { ...prev }
+          const list = Array.isArray(next[row.channel_id]) ? [...next[row.channel_id]] : []
+          if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+            const idx = list.findIndex(p => p.user_id === row.user_id)
+            const entry = { user_id: row.user_id, user_name: row.user_name }
+            if (idx >= 0) list[idx] = entry; else list.push(entry)
+          } else if (payload.eventType === 'DELETE') {
+            const idx = list.findIndex(p => p.user_id === row.user_id)
+            if (idx >= 0) list.splice(idx, 1)
+          }
+          next[row.channel_id] = list
+          return next
+        })
+      })
+      .subscribe()
+    return () => {
+      sub.unsubscribe()
+    }
+  }, [selectedServer, channels])
+
+  const toggleMute = async () => {
+    try {
+      if (!daily) return
+      await daily.setLocalAudio(muted)
+      setMuted(!muted)
+    } catch (e) {
+      console.warn('Failed to toggle mute', e)
+    }
+  }
+
+  const toggleVideo = async () => {
+    try {
+      if (!daily) return
+      await daily.setLocalVideo(!videoOn)
+      setVideoOn(!videoOn)
+    } catch (e) {
+      console.warn('Failed to toggle video', e)
+    }
+  }
+
+  const toggleScreen = async () => {
+    try {
+      if (!daily) return
+      if (!screenOn) {
+        await daily.startScreenShare()
+        setScreenOn(true)
+      } else {
+        await daily.stopScreenShare()
+        setScreenOn(false)
+      }
+    } catch (e) {
+      console.warn('Failed to toggle screen share', e)
+    }
+  }
   
   // Server member management
   const [serverMembers, setServerMembers] = useState<{[serverId: string]: Array<{id: string, user_id: string, role: 'owner' | 'admin' | 'member' | 'OWNER' | 'ADMIN' | 'MEMBER' | null, user_profiles: {email: string | null}}>}>({})
@@ -242,7 +531,7 @@ export function AuthView() {
           // Upload to Supabase Storage
           const { error: uploadError } = await supabase.storage
             .from('vault-files')
-            .upload(filePath, file)
+            .upload(filePath, file, { upsert: true, contentType: file.type || 'application/octet-stream', cacheControl: '3600' })
 
           if (uploadError) {
             console.error('Storage upload error:', uploadError)
@@ -688,7 +977,8 @@ export function AuthView() {
           id,
           content,
           user_id,
-          created_at
+          created_at,
+          message_type
         `)
         .eq('channel_id', channelId)
         .order('created_at', { ascending: true })
@@ -697,19 +987,25 @@ export function AuthView() {
 
       // Get user emails for all messages
       const userIds = [...new Set(messagesData?.map(msg => msg.user_id) || [])]
-      const { data: userData } = await supabase
+      
+      const { data: userData, error: userError } = await supabase
         .from('user_profiles')
-        .select('id, email')
-        .in('id', userIds)
+        .select('user_id, email')
+        .in('user_id', userIds)
 
-      const userEmailMap = new Map(userData?.map(user => [user.id, user.email]) || [])
+      if (userError) {
+        console.error('Error loading user profiles:', userError)
+      }
+
+      const userEmailMap = new Map(userData?.map(user => [user.user_id, user.email]) || [])
 
       const formattedMessages = messagesData?.map(msg => ({
         id: msg.id,
         content: msg.content,
         user_id: msg.user_id,
         created_at: msg.created_at,
-        user: { email: userEmailMap.get(msg.user_id) || 'Unknown' }
+        message_type: msg.message_type,
+        user: { email: userEmailMap.get(msg.user_id) || null }
       })) || []
 
       setMessages(prev => ({
@@ -737,7 +1033,8 @@ export function AuthView() {
           id,
           content,
           user_id,
-          created_at
+          created_at,
+          message_type
         `)
         .single()
 
@@ -747,7 +1044,7 @@ export function AuthView() {
       const { data: userData } = await supabase
         .from('user_profiles')
         .select('email')
-        .eq('id', user.id)
+        .eq('user_id', user.id)
         .maybeSingle()
 
       // Add message to local state
@@ -756,7 +1053,8 @@ export function AuthView() {
         content: data.content,
         user_id: data.user_id,
         created_at: data.created_at,
-        user: { email: userData?.email || 'Unknown' }
+        message_type: data.message_type,
+        user: { email: userData?.email || null }
       }
 
       setMessages(prev => {
@@ -769,8 +1067,212 @@ export function AuthView() {
       })
 
       setMessageInput('')
+      
+      // Check if this is a @Claude mention for server AI
+      if (data.content.toLowerCase().includes('@claude')) {
+        await handleClaudeResponse(data.content, selectedChannel)
+      }
+      
+      // Check if this is a @Voice mention for voice agent
+      if (data.content.toLowerCase().includes('@voice') && data.content.toLowerCase().includes('join')) {
+        await handleVoiceAgentJoin(data.content, selectedChannel)
+      }
     } catch (error) {
       console.error('Error sending message:', error)
+    }
+  }
+
+  // Handle @Voice agent join requests
+  const handleVoiceAgentJoin = async (userMessage: string, channelId: string) => {
+    if (!selectedServer || !user) return
+
+    try {
+      const token = (await supabase.auth.getSession()).data.session?.access_token
+      if (!token) return
+
+      // Check if user is currently in a voice channel
+      if (!inVoice || !activeVoiceChannelId) {
+        // Add a message indicating user needs to be in voice
+        const errorMsg = {
+          id: `voice-error-${Date.now()}`,
+          content: '🤖 **Voice Agent:** You need to be in a voice channel for me to join. Please join a voice channel first, then use @Voice join.',
+          user_id: user.id,
+          message_type: 'system',
+          created_at: new Date().toISOString(),
+          user: { email: 'Voice Agent' }
+        }
+
+        setMessages(prev => ({
+          ...prev,
+          [channelId]: [...(prev[channelId] || []), errorMsg]
+        }))
+        return
+      }
+
+      // Add a placeholder message
+      const pendingId = `voice-${Date.now()}-pending`
+      const pendingMsg = {
+        id: pendingId,
+        content: '🤖 **Voice Agent:** 🔄 *Joining your voice channel...*',
+        user_id: user.id,
+        message_type: 'system',
+        created_at: new Date().toISOString(),
+        user: { email: 'Voice Agent' }
+      }
+
+      setMessages(prev => ({
+        ...prev,
+        [channelId]: [...(prev[channelId] || []), pendingMsg]
+      }))
+
+      // Call backend to join voice agent
+      const resp = await fetch(`${apiBase}/voice/agent/join`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          server_id: selectedServer,
+          channel_id: activeVoiceChannelId,
+          user_message: userMessage
+        })
+      })
+
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`)
+      }
+
+      await resp.json() // Response data not needed for now
+      
+      // Replace pending message with success message
+      setMessages(prev => {
+        const list = [...(prev[channelId] || [])]
+        const idx = list.findIndex(m => m.id === pendingId)
+        if (idx >= 0) {
+          list[idx] = {
+            id: `voice-success-${Date.now()}`,
+            content: '🤖 **Voice Agent:** ✅ I\'ve joined your voice channel! You can now talk to me directly.',
+            user_id: user.id,
+            message_type: 'system',
+            created_at: new Date().toISOString(),
+            user: { email: 'Voice Agent' }
+          }
+        }
+        return { ...prev, [channelId]: list }
+      })
+
+    } catch (e: any) {
+      console.error('Voice agent join error:', e)
+      // Replace pending with error message
+      setMessages(prev => {
+        const list = [...(prev[channelId] || [])]
+        const idx = list.findIndex(m => m.id.includes('pending'))
+        if (idx >= 0) {
+          list[idx] = {
+            ...list[idx],
+            content: '🤖 **Voice Agent:** ❌ *Failed to join voice channel. Please try again later.*',
+            id: `voice-error-${Date.now()}`
+          }
+        }
+        return { ...prev, [channelId]: list }
+      })
+    }
+  }
+
+  // Handle @Claude mention responses
+  const handleClaudeResponse = async (userMessage: string, channelId: string) => {
+    if (!selectedServer || !user) return
+
+    try {
+      const token = (await supabase.auth.getSession()).data.session?.access_token
+      if (!token) return
+
+      // Add a placeholder Claude message
+      const pendingId = `claude-${Date.now()}-pending`
+      const pendingMsg = {
+        id: pendingId,
+        content: '🤖 **Claude:** 🤔 *Thinking...*',
+        user_id: user.id,
+        message_type: 'system',
+        created_at: new Date().toISOString(),
+        user: { email: 'Claude AI' }
+      }
+
+      setMessages(prev => ({
+        ...prev,
+        [channelId]: [...(prev[channelId] || []), pendingMsg]
+      }))
+
+      const resp = await fetch(`${apiBase}/servers/${selectedServer}/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ 
+          message: userMessage,
+          channel_id: channelId
+        })
+      })
+
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`)
+      }
+
+      const data = await resp.json()
+      
+      // Insert Claude's response as a message to the database
+      const { data: claudeMessage, error } = await supabase
+        .from('messages')
+        .insert({
+          channel_id: channelId,
+          user_id: user.id, // Use current user's ID but mark as system
+          content: `🤖 **Claude:** ${data.answer || 'Sorry, I had trouble processing that.'}`,
+          message_type: 'system'
+        })
+        .select(`
+          id,
+          content,
+          user_id,
+          created_at
+        `)
+        .single()
+
+      if (error) throw error
+
+      // Replace pending message with actual response
+      setMessages(prev => {
+        const list = [...(prev[channelId] || [])]
+        const idx = list.findIndex(m => m.id === pendingId)
+        if (idx >= 0) {
+          list[idx] = {
+            id: claudeMessage.id,
+            content: claudeMessage.content,
+            user_id: claudeMessage.user_id,
+            message_type: 'system',
+            created_at: claudeMessage.created_at,
+            user: { email: 'Claude AI' }
+          }
+        }
+        return { ...prev, [channelId]: list }
+      })
+
+    } catch (e: any) {
+      console.error('Claude response error:', e)
+      // Replace pending with error message
+      setMessages(prev => {
+        const list = [...(prev[channelId] || [])]
+        const idx = list.findIndex(m => m.id.includes('pending'))
+        if (idx >= 0) {
+          list[idx] = {
+            ...list[idx],
+            content: '🤖 **Claude:** *I\'m temporarily unavailable. Please try again later.*',
+            id: `claude-error-${Date.now()}`
+          }
+        }
+        return { ...prev, [channelId]: list }
+      })
     }
   }
 
@@ -778,22 +1280,100 @@ export function AuthView() {
   const handleSendVaultMessage = async () => {
     if (!vaultMessageInput.trim() || !selectedVault || !user) return
 
-    // For now, just add to local state as a simple chat
-    // Later this will integrate with AI agents
-    const newMessage = {
-      id: `vault-${Date.now()}`,
-      content: vaultMessageInput.trim(),
+    const messageText = vaultMessageInput.trim()
+    setVaultMessageInput('') // Clear input immediately
+
+    const userMsg = {
+      id: `vault-user-${Date.now()}`,
+      content: messageText,
       user_id: user.id,
       created_at: new Date().toISOString(),
       user: { email: user.email || 'You' }
     }
 
+    // Add a placeholder assistant message (for loading state)
+    const pendingId = `vault-ai-${Date.now()}-pending`
+    const pendingMsg = {
+      id: pendingId,
+      content: '🤔 Thinking...',
+      user_id: 'ai',
+      created_at: new Date().toISOString(),
+    }
+
     setMessages(prev => ({
       ...prev,
-      [`vault-${selectedVault}`]: [...(prev[`vault-${selectedVault}`] || []), newMessage]
+      [`vault-${selectedVault}`]: [...(prev[`vault-${selectedVault}`] || []), userMsg, pendingMsg]
     }))
 
-    setVaultMessageInput('')
+    const token = (await supabase.auth.getSession()).data.session?.access_token
+    if (!token) {
+      setMessages(prev => {
+        const list = [...(prev[`vault-${selectedVault}`] || [])]
+        const idx = list.findIndex(m => m.id === pendingId)
+        if (idx >= 0) {
+          list[idx] = { ...list[idx], content: 'Error: Not signed in' }
+        }
+        return { ...prev, [`vault-${selectedVault}`]: list }
+      })
+      return
+    }
+
+    try {
+      const resp = await fetch(`${apiBase}/vaults/${selectedVault}/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ message: messageText })
+      })
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}))
+        throw new Error(err.detail || `HTTP ${resp.status}`)
+      }
+      const data = await resp.json()
+      setMessages(prev => {
+        const list = [...(prev[`vault-${selectedVault}`] || [])]
+        const idx = list.findIndex(m => m.id === pendingId)
+        if (idx >= 0) {
+          list[idx] = {
+            ...list[idx],
+            id: `vault-${Date.now()}-ai`,
+            content: data.answer || 'No answer',
+            created_at: new Date().toISOString(),
+          }
+        } else {
+          list.push({
+            id: `vault-${Date.now()}-ai`,
+            content: data.answer || 'No answer',
+            user_id: 'ai',
+            created_at: new Date().toISOString(),
+          })
+        }
+        return { ...prev, [`vault-${selectedVault}`]: list }
+      })
+    } catch (e: any) {
+      setMessages(prev => {
+        const list = [...(prev[`vault-${selectedVault}`] || [])]
+        const idx = list.findIndex(m => m.id === pendingId)
+        if (idx >= 0) {
+          list[idx] = {
+            ...list[idx],
+            id: `vault-${Date.now()}-err`,
+            content: `AI error: ${e.message || e}`,
+            created_at: new Date().toISOString(),
+          }
+        } else {
+          list.push({
+            id: `vault-${Date.now()}-err`,
+            content: `AI error: ${e.message || e}`,
+            user_id: 'ai',
+            created_at: new Date().toISOString(),
+          })
+        }
+        return { ...prev, [`vault-${selectedVault}`]: list }
+      })
+    }
   }
 
   // Load server members
@@ -1944,26 +2524,6 @@ export function AuthView() {
                     </div>
                   ))}
                   
-                  {/* File info message */}
-                  {activeVaultTab === 'files' && (
-                    <div className="message assistant-message">
-                      <div className="message-avatar">🤖</div>
-                      <div className="message-content">
-                        {files[selectedVault]?.length > 0 ? (
-                          <>
-                            <p>You have {files[selectedVault]?.length || 0} files in your {vaults.find(v => v.id === selectedVault)?.name} vault:</p>
-                            <ul>
-                              {(files[selectedVault] || []).map(file => (
-                                <li key={file.id}>📄 {file.name} ({file.size})</li>
-                              ))}
-                            </ul>
-                          </>
-                        ) : (
-                          <p>Your {vaults.find(v => v.id === selectedVault)?.name} vault is empty. Upload some files to get started!</p>
-                        )}
-                      </div>
-                    </div>
-                  )}
                   
                   {/* Agent info message */}
                   {activeVaultTab === 'agents' && (
@@ -1996,6 +2556,7 @@ export function AuthView() {
                       <span className="send-icon">↗</span>
                     </button>
                   </div>
+                  <div ref={chatEndRef} />
                 </div>
               </div>
             ) : (
@@ -2062,65 +2623,173 @@ export function AuthView() {
                   </div>
                 ) : (
                   <div className="channel-interface">
+                    {(() => {
+                      const currentChannel = channels[selectedServer]?.find(c => c.id === selectedChannel)
+                      const isVoiceChannel = currentChannel?.type === 'voice'
+                      
+                      return (
+                        <>
                     <div className="channel-header-bar">
-                      <span className="channel-hash">#</span>
-                      <span className="channel-name">{channels[selectedServer]?.find(c => c.id === selectedChannel)?.name || 'general'}</span>
+                            <span className="channel-hash">{isVoiceChannel ? '🔊' : '#'}</span>
+                            <span className="channel-name">{currentChannel?.name || 'general'}</span>
                       <div className="channel-divider">|</div>
-                      <span className="channel-description">Channel for team discussion</span>
+                            <span className="channel-description">
+                              {isVoiceChannel ? 'Voice channel for real-time communication' : 'Channel for team discussion'}
+                            </span>
                       
                       {/* channel-actions removed per request */}
                     </div>
                     
-                    <div className="channel-content">
-                      <div className="welcome-message">
-                        <h3>Welcome to #{channels[selectedServer]?.find(c => c.id === selectedChannel)?.name || 'general'}!</h3>
-                        <p>This is the start of your conversation in this channel.</p>
-                      </div>
-                      
-                      <div className="sample-messages">
-                        {(messages[selectedChannel] || []).map(message => (
-                          <div key={`${message.id}-${message.created_at || ''}`} className="message">
-                            <div className="message-avatar">
-                              {message.user_id === user?.id ? '👤' : '👩‍💻'}
-                            </div>
-                            <div className="message-content">
-                              <div className="message-header">
-                                <span className="username">
-                                  {message.user_id === user?.id ? 'You' : (message.user?.email?.split('@')[0] || 'User')}
-                                </span>
-                                <span className="timestamp">
-                                  {message.created_at ? new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Unknown time'}
-                                </span>
+                          {isVoiceChannel ? (
+                            // Voice channel interface
+                            inVoice ? (
+                              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', position: 'relative' }}>
+                                {/* Video/Screenshare area */}
+                                <div style={{ flex: 1, padding: 16, paddingBottom: !videoOn && !screenOn ? '200px' : '16px' }}>
+                                  <div ref={mediaContainerRef} style={{ width: '100%', height: '100%', display: 'grid', gridTemplateColumns: '1fr', gap: 12 }} />
+                                </div>
+                                
+                                {/* Chat area - only show when video and screenshare are off */}
+                                {!videoOn && !screenOn && (
+                                  <div className="voice-chat-overlay">
+                                    <div className="voice-chat-header">
+                                      <span className="voice-chat-title">
+                                        Voice Chat
+                                      </span>
+                                    </div>
+                                    
+                                    <div className="voice-chat-content">
+                                      <div className="sample-messages">
+                                        {(messages[selectedChannel] || []).map(message => {
+                                          const isClaudeMessage = message.message_type === 'system' && message.content.startsWith('🤖 **Claude:**')
+                                          return (
+                                          <div key={`${message.id}-${message.created_at || ''}`} className={`message ${isClaudeMessage ? 'claude-message' : ''}`}>
+                                            <div className="message-avatar">
+                                              {message.user_id === user?.id && !isClaudeMessage ? '👤' : isClaudeMessage ? '🤖' : '👩‍💻'}
+                                            </div>
+                                            <div className="message-content">
+                                              <div className="message-header">
+                                                <span className="username">
+                                                  {isClaudeMessage ? 'Claude' : message.user_id === user?.id ? 'You' : (message.user?.email ? message.user.email.split('@')[0] : 'User')}
+                                                </span>
+                                                <span className="timestamp">
+                                                  {message.created_at ? new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Unknown time'}
+                                                </span>
+                                              </div>
+                                              <div className="message-text">{message.content}</div>
+                                            </div>
+                                          </div>
+                                          )
+                                        })}
+                                        
+                                        {(messages[selectedChannel] || []).length === 0 && (
+                                          <div className="empty-state">
+                                            <div className="empty-icon">💬</div>
+                                            <div className="empty-text">No messages yet</div>
+                                            <div className="empty-subtext">Send a message while voice chatting!</div>
+                                          </div>
+                                        )}
+                                      </div>
+                                    </div>
+                                    
+                                    <div className="message-input-area">
+                                      <div className="message-input-wrapper">
+                                        <input 
+                                          type="text" 
+                                          className="message-input" 
+                                          placeholder={`Message while in voice...`}
+                                          value={messageInput}
+                                          onChange={(e) => setMessageInput(e.target.value)}
+                                          onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+                                        />
+                                        <button className="send-btn" onClick={handleSendMessage}>➤</button>
+                                      </div>
+                                    </div>
+                                  </div>
+                                )}
                               </div>
-                              <div className="message-text">{message.content}</div>
-                            </div>
+                            ) : (
+                              <div className="voice-channel-content">
+                                <div className="voice-channel-info">
+                                  <div className="voice-icon">🔊</div>
+                                  <h3>Welcome to {currentChannel?.name || 'Voice Channel'}!</h3>
+                                  <p>Join this voice channel to start talking with your team.</p>
+                                  <button 
+                                    className="join-voice-btn"
+                                    onClick={() => joinVoiceChannel(selectedChannel)}
+                                    disabled={joiningVoice}
+                                  >
+                                    {joiningVoice ? 'Joining...' : 'Join Voice Channel'}
+                                  </button>
+                                </div>
+                              </div>
+                            )
+                          ) : (
+                            // Text channel interface
+                            inVoice ? (
+                      <div style={{ flex: 1, padding: 16 }}>
+                        <div ref={mediaContainerRef} style={{ width: '100%', height: '100%', display: 'grid', gridTemplateColumns: '1fr', gap: 12 }} />
+                      </div>
+                    ) : (
+                      <>
+                        <div className="channel-content">
+                          <div className="welcome-message">
+                                    <h3>Welcome to #{currentChannel?.name || 'general'}!</h3>
+                            <p>This is the start of your conversation in this channel.</p>
                           </div>
-                        ))}
+                          
+                          <div className="sample-messages">
+                            {(messages[selectedChannel] || []).map(message => {
+                              const isClaudeMessage = message.message_type === 'system' && message.content.startsWith('🤖 **Claude:**')
+                              return (
+                              <div key={`${message.id}-${message.created_at || ''}`} className={`message ${isClaudeMessage ? 'claude-message' : ''}`}>
+                                <div className="message-avatar">
+                                  {message.user_id === user?.id && !isClaudeMessage ? '👤' : isClaudeMessage ? '🤖' : '👩‍💻'}
+                                </div>
+                                <div className="message-content">
+                                  <div className="message-header">
+                                    <span className="username">
+                                      {isClaudeMessage ? 'Claude' : message.user_id === user?.id ? 'You' : (message.user?.email ? message.user.email.split('@')[0] : 'User')}
+                                    </span>
+                                    <span className="timestamp">
+                                      {message.created_at ? new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Unknown time'}
+                                    </span>
+                                  </div>
+                                  <div className="message-text">{message.content}</div>
+                                </div>
+                              </div>
+                              )
+                            })}
+                            
+                            {(messages[selectedChannel] || []).length === 0 && (
+                              <div className="empty-state">
+                                <div className="empty-icon">💬</div>
+                                <div className="empty-text">No messages yet</div>
+                                <div className="empty-subtext">Start the conversation!</div>
+                              </div>
+                            )}
+                          </div>
+                        </div>
                         
-                        {/* Show empty state if no real messages */}
-                        {(messages[selectedChannel] || []).length === 0 && (
-                          <div className="empty-state">
-                            <div className="empty-icon">💬</div>
-                            <div className="empty-text">No messages yet</div>
-                            <div className="empty-subtext">Start the conversation!</div>
+                        <div className="message-input-area">
+                          <div className="message-input-wrapper">
+                            <input 
+                              type="text" 
+                              className="message-input" 
+                                      placeholder={`Message #${currentChannel?.name || 'general'}`}
+                              value={messageInput}
+                              onChange={(e) => setMessageInput(e.target.value)}
+                              onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+                            />
+                            <button className="send-btn" onClick={handleSendMessage}>➤</button>
                           </div>
-                        )}
-                      </div>
-                    </div>
-                    
-                    <div className="message-input-area">
-                      <div className="message-input-wrapper">
-                        <input 
-                          type="text" 
-                          className="message-input" 
-                          placeholder={`Message #${channels[selectedServer]?.find(c => c.id === selectedChannel)?.name || 'general'}`}
-                          value={messageInput}
-                          onChange={(e) => setMessageInput(e.target.value)}
-                          onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
-                        />
-                        <button className="send-btn" onClick={handleSendMessage}>➤</button>
-                      </div>
-                    </div>
+                        </div>
+                      </>
+                            )
+                    )}
+                        </>
+                      )
+                    })()}
                   </div>
                 )}
               </div>
@@ -2199,14 +2868,125 @@ export function AuthView() {
                       <div 
                         key={channel.id}
                         className="channel-item voice-channel"
+                        onClick={() => {
+                          setSelectedChannel(channel.id)
+                          if (!joiningVoice) {
+                            void joinVoiceChannel(channel.id)
+                          }
+                        }}
                         onContextMenu={(e) => handleChannelRightClick(e, channel.id)}
                       >
                         <span className="channel-hash">🔊</span>
                         <span className="channel-name">{channel.name}</span>
+                        {inVoice && activeVoiceChannelId === channel.id && participants.length > 0 && (
+                          <div style={{ width: '100%', marginTop: 6, marginLeft: 24 }}>
+                            {participants.map(p => (
+                              <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 0', color: '#cbd5e1' }}>
+                                <span style={{ width: 6, height: 6, background: '#10b981', borderRadius: '50%', display: 'inline-block' }} />
+                                <span style={{ fontSize: 12, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
+                                <img src={p.audio ? micIcon : muteIcon} alt={p.audio ? 'Audio on' : 'Muted'} style={{ width: 16, height: 16, opacity: p.audio ? 1 : 0.8 }} />
+                                <img src={videoIcon} alt={p.video ? 'Video on' : 'Video off'} style={{ width: 16, height: 16, opacity: p.video ? 1 : 0.4 }} />
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {!inVoice && (voicePresenceByChannel[channel.id]?.length || 0) > 0 && (
+                          <div style={{ width: '100%', marginTop: 6, marginLeft: 24 }}>
+                            {(voicePresenceByChannel[channel.id] || []).map(p => (
+                              <div key={p.user_id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 0', color: '#94a3b8' }}>
+                                <span style={{ width: 6, height: 6, background: '#64748b', borderRadius: '50%', display: 'inline-block' }} />
+                                <span style={{ fontSize: 12, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.user_name}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
                 </div>
+
+                {inVoice && (
+                  <div style={{
+                    marginTop: 'auto',
+                    padding: '12px',
+                    borderTop: '1px solid rgba(255,255,255,0.1)',
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(4, 1fr)',
+                    gap: '8px'
+                  }}>
+                    <button
+                      title={muted ? 'Unmute' : 'Mute'}
+                      onClick={() => void toggleMute()}
+                      style={{
+                        background: muted ? 'rgba(239,68,68,0.15)' : 'rgba(99,102,241,0.15)',
+                        border: '1px solid rgba(255,255,255,0.15)',
+                        borderRadius: 6,
+                        color: '#fff',
+                        padding: 0,
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center'
+                      }}
+                    >
+                      <img src={muted ? muteIcon : micIcon} alt={muted ? 'Unmute' : 'Mute'} style={{ width: 24, height: 24 }} />
+                    </button>
+
+                    <button
+                      title={videoOn ? 'Turn video off' : 'Turn video on'}
+                      onClick={() => void toggleVideo()}
+                      style={{
+                        background: videoOn ? 'rgba(99,102,241,0.15)' : 'rgba(55,65,81,0.6)',
+                        border: '1px solid rgba(255,255,255,0.15)',
+                        borderRadius: 6,
+                        color: '#fff',
+                        padding: 0,
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center'
+                      }}
+                    >
+                      <img src={videoIcon} alt={videoOn ? 'Video on' : 'Video off'} style={{ width: 24, height: 24, opacity: videoOn ? 1 : 0.6 }} />
+                    </button>
+
+                    <button
+                      title={screenOn ? 'Stop sharing' : 'Share screen'}
+                      onClick={() => void toggleScreen()}
+                      style={{
+                        background: screenOn ? 'rgba(99,102,241,0.15)' : 'rgba(55,65,81,0.6)',
+                        border: '1px solid rgba(255,255,255,0.15)',
+                        borderRadius: 6,
+                        color: '#fff',
+                        padding: 0,
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center'
+                      }}
+                    >
+                      <span style={{ fontSize: 20 }}>🖥️</span>
+                    </button>
+
+                    <button
+                      title="End call"
+                      onClick={() => void leaveVoiceChannel()}
+                      style={{
+                        background: 'rgba(239,68,68,0.2)',
+                        border: '1px solid rgba(239,68,68,0.4)',
+                        borderRadius: 6,
+                        color: '#fff',
+                        padding: 0,
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center'
+                      }}
+                    >
+                      <img src={endCallIcon} alt="End call" style={{ width: 24, height: 24 }} />
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           ) : (
