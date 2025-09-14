@@ -47,20 +47,37 @@ async def _get_or_create_room(channel_id: str, api_key: str) -> tuple[str, str]:
         return data["name"], data["url"]
 
 
+# Debug endpoint to test token validation
+@router.post("/voice/debug-token")
+async def debug_token(authorization: str = Header(default=None)):
+    if not authorization or not authorization.lower().startswith('bearer '):
+        return {"error": "Missing bearer token", "authorization_header": authorization}
+    
+    token = authorization.split(' ', 1)[1]
+    try:
+        claims = verify_supabase_jwt(token)
+        return {"success": True, "claims": claims, "token_length": len(token)}
+    except Exception as e:
+        return {"error": f"Invalid token: {e}", "token_length": len(token)}
+
 @router.post("/voice/join", response_model=JoinResponse)
 async def join_voice(body: JoinRequest, authorization: str = Header(default=None)):
     api_key = os.getenv("DAILY_API_KEY", "")
     if not api_key:
         raise HTTPException(status_code=500, detail="DAILY_API_KEY not configured")
 
-    # Validate JWT from Supabase
-    if not authorization or not authorization.lower().startswith('bearer '):
-        raise HTTPException(status_code=401, detail="Missing bearer token")
-    token = authorization.split(' ', 1)[1]
-    try:
-        claims = verify_supabase_jwt(token)
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
+    # TEMPORARY: Skip JWT validation for testing (REMOVE IN PRODUCTION!)
+    if os.getenv("ENVIRONMENT") == "development":
+        print("🚨 WARNING: JWT validation bypassed for development!")
+    else:
+        # Validate JWT from Supabase
+        if not authorization or not authorization.lower().startswith('bearer '):
+            raise HTTPException(status_code=401, detail="Missing bearer token")
+        token = authorization.split(' ', 1)[1]
+        try:
+            claims = verify_supabase_jwt(token)
+        except Exception as e:
+            raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
 
     # Create or fetch Daily room for this channel
     room_name, room_url = await _get_or_create_room(body.channel_id, api_key)
