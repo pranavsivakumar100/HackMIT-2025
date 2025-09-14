@@ -490,7 +490,6 @@ export type Database = {
           google_drive_refresh_token?: string | null
           google_drive_token_expires_at?: string | null
           id?: string
-          is_first_login?: boolean | null
           updated_at?: string | null
           user_id?: string | null
         }
@@ -588,6 +587,10 @@ export type Database = {
         Args: { _sid: string; _uid: string }
         Returns: boolean
       }
+      rpc_accept_server_invite: {
+        Args: { _invite_code: string }
+        Returns: string
+      }
       rpc_add_member: {
         Args: {
           _role?: Database["public"]["Enums"]["server_role"]
@@ -597,13 +600,19 @@ export type Database = {
         Returns: undefined
       }
       rpc_create_channel: {
-        Args:
-          | { _name: string; _server: string }
-          | { _name: string; _server: string; _type?: string }
+        Args: { _name: string; _server: string; _type?: string }
         Returns: string
       }
+      rpc_delete_channel: {
+        Args: { _channel_id: string }
+        Returns: boolean
+      }
       rpc_create_server: {
-        Args: { _icon?: string; _name: string } | { _name: string }
+        Args: { _icon?: string; _name: string }
+        Returns: string
+      }
+      rpc_create_server_invite: {
+        Args: { _expires_at?: string; _max_uses?: number; _server_id: string }
         Returns: string
       }
       rpc_link_vault_to_server: {
